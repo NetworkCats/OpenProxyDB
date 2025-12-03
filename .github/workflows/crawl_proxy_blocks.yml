@@ -12,6 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
     timeout-minutes: 120
     # Only run on the original repository, not forks
     if: github.repository == 'networkcats/OpenProxyDB'
