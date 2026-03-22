@@ -4,8 +4,8 @@ on:
   repository_dispatch:
   workflow_dispatch:
   schedule:
-    # Run daily at 01:00 UTC
-    - cron: '0 1 * * *'
+    # Run daily at 00:22 UTC
+    - cron: '22 0 * * *'
 
 jobs:
   crawl:
