@@ -27,6 +27,8 @@ from src.config import (
     REQUESTS_PER_SECOND,
     RETRY_DELAY,
     WIKIPEDIA_API_URL,
+    ZH_LOCAL_BLOCKS_PARAMS,
+    ZH_WIKIPEDIA_API_URL,
     get_user_agent,
 )
 from src.csv_handler import CSVHandler
@@ -115,10 +117,13 @@ class AsyncWikipediaCrawler:
         """Get the CSV handler."""
         return self._csv_handler
 
-    async def _make_request(self, params: dict) -> Optional[dict]:
+    async def _make_request(
+        self, endpoint_url: str, params: dict
+    ) -> Optional[dict]:
         """Make an API request with retry logic.
 
         Args:
+            endpoint_url: The MediaWiki API endpoint URL.
             params: Query parameters for the API.
 
         Returns:
@@ -131,7 +136,7 @@ class AsyncWikipediaCrawler:
             await self._rate_limiter.acquire()
             try:
                 async with self._session.get(
-                    WIKIPEDIA_API_URL, params=params
+                    endpoint_url, params=params
                 ) as response:
                     if response.status == 429:
                         # Rate limited
@@ -190,7 +195,7 @@ class AsyncWikipediaCrawler:
         total_fetched = 0
 
         while True:
-            data = await self._make_request(params)
+            data = await self._make_request(WIKIPEDIA_API_URL, params)
             if not data:
                 logger.error("Failed to fetch local blocks")
                 break
@@ -241,7 +246,7 @@ class AsyncWikipediaCrawler:
         total_fetched = 0
 
         while True:
-            data = await self._make_request(params)
+            data = await self._make_request(WIKIPEDIA_API_URL, params)
             if not data:
                 logger.error("Failed to fetch global blocks")
                 break
@@ -264,6 +269,58 @@ class AsyncWikipediaCrawler:
 
         logger.info(
             f"Completed global blocks: {total_fetched} fetched, {total_added} added"
+        )
+        return total_added
+
+    async def fetch_zh_local_blocks(
+        self, start_time: Optional[str] = None, end_time: Optional[str] = None
+    ) -> int:
+        """Fetch local blocks from Chinese Wikipedia.
+
+        Args:
+            start_time: Start timestamp for incremental crawl.
+            end_time: End timestamp for incremental crawl.
+
+        Returns:
+            Number of blocks added.
+        """
+        logger.info("Fetching zh.wikipedia local blocks...")
+        params = ZH_LOCAL_BLOCKS_PARAMS.copy()
+
+        if start_time:
+            params["bkstart"] = start_time
+            params["bkdir"] = "newer"
+        if end_time:
+            params["bkend"] = end_time
+
+        total_added = 0
+        total_fetched = 0
+
+        while True:
+            data = await self._make_request(ZH_WIKIPEDIA_API_URL, params)
+            if not data:
+                logger.error("Failed to fetch zh local blocks")
+                break
+
+            blocks = data.get("query", {}).get("blocks", [])
+            total_fetched += len(blocks)
+
+            for block in blocks:
+                if self._block_manager.add_block(block, "local"):
+                    total_added += 1
+
+            logger.info(
+                f"Fetched {total_fetched} zh local blocks, {total_added} added"
+            )
+
+            continue_data = data.get("continue")
+            if continue_data:
+                params.update(continue_data)
+            else:
+                break
+
+        logger.info(
+            f"Completed zh local blocks: {total_fetched} fetched, {total_added} added"
         )
         return total_added
 
@@ -439,6 +496,7 @@ class AsyncWikipediaCrawler:
         await asyncio.gather(
             self.fetch_local_blocks(),
             self.fetch_global_blocks(),
+            self.fetch_zh_local_blocks(),
         )
 
         # Remove expired blocks
@@ -521,6 +579,7 @@ class AsyncWikipediaCrawler:
         await asyncio.gather(
             self.fetch_local_blocks(start_time=last_crawl_time),
             self.fetch_global_blocks(start_time=last_crawl_time),
+            self.fetch_zh_local_blocks(start_time=last_crawl_time),
         )
 
         # Record current time AFTER fetching completes as next starting point

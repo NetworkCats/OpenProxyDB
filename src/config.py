@@ -2,9 +2,18 @@
 
 # API Endpoints
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+ZH_WIKIPEDIA_API_URL = "https://zh.wikipedia.org/w/api.php"
 
 # API Parameters
 LOCAL_BLOCKS_PARAMS = {
+    "action": "query",
+    "list": "blocks",
+    "bkprop": "user|timestamp|expiry|reason|range",
+    "bklimit": 500,
+    "format": "json",
+}
+
+ZH_LOCAL_BLOCKS_PARAMS = {
     "action": "query",
     "list": "blocks",
     "bkprop": "user|timestamp|expiry|reason|range",
@@ -33,6 +42,19 @@ PROXY_CLASSIFICATIONS = {
     "school block": "school-block",
     "tor": "tor",
     "webhost": "webhost",
+    "代理": "proxy",
+    "虚拟专用网": "vpn",
+    "虛擬專用網": "vpn",
+    "托管": "webhost",
+    "託管": "webhost",
+    "洋葱": "tor",
+    "洋蔥": "tor",
+    "学校封禁": "school-block",
+    "學校封禁": "school-block",
+    "段封禁": "rangeblock",
+    "段封鎖": "rangeblock",
+    "公共无线": "public-wifi",
+    "公共無線": "public-wifi",
 }
 
 # Rate limiting settings
