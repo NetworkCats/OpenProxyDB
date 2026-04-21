@@ -42,6 +42,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class WikipediaAPIError(RuntimeError):
+    """Raised when a Wikipedia API request fails after exhausting retries."""
+
+
 class AsyncRateLimiter:
     """Async rate limiter for API requests using token bucket algorithm."""
 
@@ -117,9 +121,7 @@ class AsyncWikipediaCrawler:
         """Get the CSV handler."""
         return self._csv_handler
 
-    async def _make_request(
-        self, endpoint_url: str, params: dict
-    ) -> Optional[dict]:
+    async def _make_request(self, endpoint_url: str, params: dict) -> dict:
         """Make an API request with retry logic.
 
         Args:
@@ -127,7 +129,10 @@ class AsyncWikipediaCrawler:
             params: Query parameters for the API.
 
         Returns:
-            JSON response as dictionary, or None on failure.
+            JSON response as dictionary.
+
+        Raises:
+            WikipediaAPIError: If all retries are exhausted.
         """
         if not self._session:
             raise RuntimeError("Session not initialized. Use async context manager.")
@@ -167,8 +172,9 @@ class AsyncWikipediaCrawler:
             finally:
                 self._rate_limiter.release()
 
-        logger.error(f"Failed after {MAX_RETRIES} attempts")
-        return None
+        raise WikipediaAPIError(
+            f"Failed to fetch {endpoint_url} after {MAX_RETRIES} attempts"
+        )
 
     async def fetch_local_blocks(
         self, start_time: Optional[str] = None, end_time: Optional[str] = None
@@ -196,9 +202,6 @@ class AsyncWikipediaCrawler:
 
         while True:
             data = await self._make_request(WIKIPEDIA_API_URL, params)
-            if not data:
-                logger.error("Failed to fetch local blocks")
-                break
 
             blocks = data.get("query", {}).get("blocks", [])
             total_fetched += len(blocks)
@@ -247,9 +250,6 @@ class AsyncWikipediaCrawler:
 
         while True:
             data = await self._make_request(WIKIPEDIA_API_URL, params)
-            if not data:
-                logger.error("Failed to fetch global blocks")
-                break
 
             blocks = data.get("query", {}).get("globalblocks", [])
             total_fetched += len(blocks)
@@ -298,9 +298,6 @@ class AsyncWikipediaCrawler:
 
         while True:
             data = await self._make_request(ZH_WIKIPEDIA_API_URL, params)
-            if not data:
-                logger.error("Failed to fetch zh local blocks")
-                break
 
             blocks = data.get("query", {}).get("blocks", [])
             total_fetched += len(blocks)
@@ -492,16 +489,32 @@ class AsyncWikipediaCrawler:
         # Full crawl starts with empty set
         initial_ips: Set[str] = set()
 
-        # Fetch local and global blocks concurrently
-        await asyncio.gather(
+        # Fetch local and global blocks concurrently.
+        # Use return_exceptions so all fetchers complete (or fail) before we
+        # decide whether to commit results — writing a partial CSV would
+        # silently truncate the dataset on the next incremental run.
+        results = await asyncio.gather(
             self.fetch_local_blocks(),
             self.fetch_global_blocks(),
             self.fetch_zh_local_blocks(),
+            return_exceptions=True,
         )
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if errors:
+            for err in errors:
+                logger.error(f"Fetcher failed: {err}")
+            logger.error(
+                "Aborting full crawl; refusing to overwrite CSV with partial data"
+            )
+            return False
 
         # Remove expired blocks
         expired_count = self._block_manager.remove_expired_blocks()
         logger.info(f"Removed {expired_count} expired blocks")
+
+        # Collapse redundant CIDR subsets (e.g. a bare IP already inside a /24)
+        dedup_count = self._block_manager.deduplicate()
+        logger.info(f"Deduplicated {dedup_count} redundant subset blocks")
 
         # Get final IPs and calculate stats
         final_ips = self._get_current_ips()
@@ -575,12 +588,24 @@ class AsyncWikipediaCrawler:
         # Record initial IPs before fetching new blocks
         initial_ips = self._get_current_ips()
 
-        # Fetch new blocks since last crawl (duplicates are merged by BlockManager)
-        await asyncio.gather(
+        # Fetch new blocks since last crawl (duplicates are merged by BlockManager).
+        # On failure, bail out before advancing last_crawl_time so the next run
+        # retries the same incremental window instead of skipping over it.
+        results = await asyncio.gather(
             self.fetch_local_blocks(start_time=last_crawl_time),
             self.fetch_global_blocks(start_time=last_crawl_time),
             self.fetch_zh_local_blocks(start_time=last_crawl_time),
+            return_exceptions=True,
         )
+        errors = [r for r in results if isinstance(r, BaseException)]
+        if errors:
+            for err in errors:
+                logger.error(f"Fetcher failed: {err}")
+            logger.error(
+                "Aborting incremental crawl; last_crawl_time left unchanged "
+                "so the next run retries this window"
+            )
+            return False
 
         # Record current time AFTER fetching completes as next starting point
         current_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -588,6 +613,10 @@ class AsyncWikipediaCrawler:
         # Remove expired blocks
         expired_count = self._block_manager.remove_expired_blocks()
         logger.info(f"Removed {expired_count} expired blocks")
+
+        # Collapse redundant CIDR subsets (e.g. a bare IP already inside a /24)
+        dedup_count = self._block_manager.deduplicate()
+        logger.info(f"Deduplicated {dedup_count} redundant subset blocks")
 
         # Get final IPs and calculate stats
         final_ips = self._get_current_ips()

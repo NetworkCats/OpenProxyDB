@@ -25,6 +25,24 @@ def _parse_timestamp(timestamp: str) -> Optional[datetime]:
         return None
 
 
+def _to_network(ip: str) -> Optional[ipaddress._BaseNetwork]:
+    """Parse an IP or CIDR string into an ip_network.
+
+    Bare addresses are widened to their single-host form (/32 for IPv4,
+    /128 for IPv6) so every stored entry can be compared via subnet
+    containment.
+    """
+    if not ip:
+        return None
+    try:
+        if "/" in ip:
+            return ipaddress.ip_network(ip, strict=False)
+        addr = ipaddress.ip_address(ip)
+        return ipaddress.ip_network(f"{addr}/{addr.max_prefixlen}")
+    except ValueError:
+        return None
+
+
 def _compare_timestamps(ts1: str, ts2: str, prefer_earlier: bool = True) -> str:
     """Compare two timestamps and return the preferred one.
 
@@ -286,6 +304,85 @@ class BlockManager:
         for ip in expired_ips:
             del self._blocks[ip]
         return len(expired_ips)
+
+    def deduplicate(self) -> int:
+        """Collapse redundant CIDR subsets into their containing ranges.
+
+        Exact-IP duplicates from multiple sources are already merged at
+        insertion time by `add_block`. This method handles the remaining
+        case: entries whose address range is fully contained within a
+        larger range that is also tracked (e.g. 1.2.3.4 inside 1.2.3.0/24,
+        or 10.0.0.0/24 inside 10.0.0.0/16). The subset's classifications
+        and timestamps are merged into the container before it is removed.
+
+        Returns:
+            Number of redundant subset entries removed.
+        """
+        # Parse each stored key into an ip_network (bare addresses become
+        # /32 or /128 single-host networks). Keep the mapping from network
+        # object back to the original stored key.
+        networks: dict[str, ipaddress._BaseNetwork] = {}
+        lookup: dict[int, dict[ipaddress._BaseNetwork, str]] = {4: {}, 6: {}}
+        for ip in self._blocks:
+            net = _to_network(ip)
+            if net is None:
+                continue
+            networks[ip] = net
+            lookup[net.version][net] = ip
+
+        # For each entry, walk up its supernet chain. Record the closest
+        # containing entry (not itself). Narrower subsets are scheduled
+        # for removal first so chained redundancy (A ⊃ B ⊃ C) collapses
+        # upward correctly when we apply the merges in order.
+        pending: list[tuple[str, str, int]] = []
+        for ip, net in networks.items():
+            current = net
+            while current.prefixlen > 0:
+                current = current.supernet(prefixlen_diff=1)
+                container_ip = lookup[net.version].get(current)
+                if container_ip is not None and container_ip != ip:
+                    pending.append((ip, container_ip, net.prefixlen))
+                    break
+
+        # Sort narrowest-first so C→B merges before B→A (otherwise B would
+        # already be gone when we try to merge C into it).
+        pending.sort(key=lambda item: -item[2])
+
+        removed = 0
+        for subset_ip, container_ip, _prefixlen in pending:
+            subset = self._blocks.pop(subset_ip, None)
+            if subset is None:
+                continue
+            container = self._blocks.get(container_ip)
+            if container is None:
+                # Container was itself removed via a chain merge; put the
+                # subset back under the broader ancestor that absorbed it.
+                # Find the absorbing root by chasing pending entries.
+                self._blocks[subset_ip] = subset
+                continue
+            self._merge_record(container, subset)
+            removed += 1
+        return removed
+
+    @staticmethod
+    def _merge_record(target: BlockRecord, source: BlockRecord) -> None:
+        """Fold `source`'s classifications and timestamps into `target`."""
+        target.classifications.update(source.classifications)
+        if source.block_time and target.block_time:
+            target.block_time = _compare_timestamps(
+                target.block_time, source.block_time, prefer_earlier=True
+            )
+        elif source.block_time:
+            target.block_time = source.block_time
+        if source.expiry_time:
+            if target.expiry_time == "infinity" or source.expiry_time == "infinity":
+                target.expiry_time = "infinity"
+            elif target.expiry_time:
+                target.expiry_time = _compare_timestamps(
+                    target.expiry_time, source.expiry_time, prefer_earlier=False
+                )
+            else:
+                target.expiry_time = source.expiry_time
 
     def get_all_blocks(self) -> list[BlockRecord]:
         """Get all block records.
