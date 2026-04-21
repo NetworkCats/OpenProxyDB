@@ -35,8 +35,9 @@ class CSVHandler:
         output = io.StringIO()
         writer = csv.writer(output)
 
-        # Generate headers from PROXY_CLASSIFICATIONS
-        classification_columns = list(PROXY_CLASSIFICATIONS.values())
+        # Generate headers from PROXY_CLASSIFICATIONS (dedupe: multiple keywords
+        # map to the same classification, e.g. "proxy" and "代理" → "proxy")
+        classification_columns = list(dict.fromkeys(PROXY_CLASSIFICATIONS.values()))
         headers = ["ip"] + classification_columns
         writer.writerow(headers)
 
@@ -120,8 +121,8 @@ class CSVHandler:
             manager = BlockManager()
 
         records = self.read_csv(content)
-        # Classification columns from PROXY_CLASSIFICATIONS
-        classification_columns = list(PROXY_CLASSIFICATIONS.values())
+        # Classification columns from PROXY_CLASSIFICATIONS (deduped)
+        classification_columns = list(dict.fromkeys(PROXY_CLASSIFICATIONS.values()))
 
         # Load metadata if provided
         metadata_by_ip: dict[str, dict] = {}
