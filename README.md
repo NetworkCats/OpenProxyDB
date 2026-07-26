@@ -4,8 +4,6 @@ A crawler that collects proxy-related IP blocks from Wikipedia's local and globa
 
 MMDB format: https://github.com/NetworkCats/Merged-IP-Data
 
-Online query: https://ip.nc.gy
-
 ## Overview
 
 OpenProxyDB automatically fetches IP addresses that have been blocked by Wikipedia for proxy-related reasons (VPN, Tor, webhost, etc.) and exports them to a CSV file. The crawler runs daily via GitHub Actions and publishes the results to GitHub Releases.
