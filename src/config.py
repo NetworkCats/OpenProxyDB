@@ -76,7 +76,7 @@ MAX_HEADER_FIELD_SIZE = 65536
 # User-Agent template for Wikipedia API compliance
 # The actual User-Agent will be built with the aiohttp version at runtime
 USER_AGENT_TEMPLATE = (
-    "OpenProxyDB/1.0 "
+    "OpenProxyDB/1.1 "
     "(https://github.com/networkcats/OpenProxyDB) "
     "Python-aiohttp/{version}"
 )
