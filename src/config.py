@@ -40,6 +40,7 @@ PROXY_CLASSIFICATIONS = {
     "public wi-fi": "public-wifi",
     "rangeblock": "rangeblock",
     "school block": "school-block",
+    "schoolblock": "school-block",
     "tor": "tor",
     "webhost": "webhost",
     "代理": "proxy",
@@ -56,6 +57,10 @@ PROXY_CLASSIFICATIONS = {
     "公共无线": "public-wifi",
     "公共無線": "public-wifi",
 }
+
+# Keywords that must match as a whole word rather than a substring
+# ("tor" would otherwise match "editor", "history", "story", ...)
+WHOLE_WORD_KEYWORDS = {"tor"}
 
 # Rate limiting settings
 REQUESTS_PER_SECOND = 5

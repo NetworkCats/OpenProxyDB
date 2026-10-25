@@ -1,11 +1,27 @@
 """Block record management for OpenProxyDB."""
 
 import ipaddress
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.config import PROXY_CLASSIFICATIONS
+from src.config import PROXY_CLASSIFICATIONS, WHOLE_WORD_KEYWORDS
+
+# Whole-word keywords are bounded by ASCII letters/digits only, since \b treats
+# CJK characters as word characters and would miss e.g. "Tor出口节点"
+_WHOLE_WORD_PATTERNS = {
+    keyword: re.compile(rf"(?<![a-z0-9]){re.escape(keyword)}(?![a-z0-9])")
+    for keyword in WHOLE_WORD_KEYWORDS
+}
+
+
+def _keyword_in(keyword: str, text: str) -> bool:
+    """Check if a keyword occurs in already-lowercased text."""
+    pattern = _WHOLE_WORD_PATTERNS.get(keyword)
+    if pattern:
+        return pattern.search(text) is not None
+    return keyword in text
 
 
 def _parse_timestamp(timestamp: str) -> Optional[datetime]:
@@ -104,7 +120,7 @@ class BlockManager:
             return False
 
         reason_lower = reason.lower()
-        return any(keyword in reason_lower for keyword in PROXY_CLASSIFICATIONS)
+        return any(_keyword_in(keyword, reason_lower) for keyword in PROXY_CLASSIFICATIONS)
 
     def extract_classifications(self, reason: str) -> set[str]:
         """Extract classification types from block reason.
@@ -121,7 +137,7 @@ class BlockManager:
 
         reason_lower = reason.lower()
         for keyword, classification in PROXY_CLASSIFICATIONS.items():
-            if keyword in reason_lower:
+            if _keyword_in(keyword, reason_lower):
                 classifications.add(classification)
 
         return classifications
