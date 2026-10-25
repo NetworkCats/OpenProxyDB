@@ -20,7 +20,9 @@ from src.config import (
     LAST_CRAWL_TIME_FILE,
     LOCAL_BLOCKS_PARAMS,
     MAX_CONCURRENT_REQUESTS,
+    MAX_HEADER_FIELD_SIZE,
     MAX_RETRIES,
+    MAX_RETRY_AFTER,
     METADATA_CSV_FILENAME,
     REDUCED_REQUESTS_PER_SECOND,
     REQUEST_TIMEOUT,
@@ -103,6 +105,7 @@ class AsyncWikipediaCrawler:
         self._session = aiohttp.ClientSession(
             headers={"User-Agent": get_user_agent()},
             timeout=timeout,
+            max_field_size=MAX_HEADER_FIELD_SIZE,
         )
         return self
 
@@ -150,6 +153,12 @@ class AsyncWikipediaCrawler:
                             self._rate_reduced = True
 
                         backoff_time = BACKOFF_MULTIPLIER ** (attempt + 1)
+                        # Honor the server's Retry-After (seconds) if it asks for longer
+                        retry_after = response.headers.get("Retry-After", "")
+                        if retry_after.isdigit():
+                            backoff_time = max(
+                                backoff_time, min(int(retry_after), MAX_RETRY_AFTER)
+                            )
                         logger.warning(
                             f"Rate limited (429). Backing off for {backoff_time}s"
                         )

@@ -58,15 +58,20 @@ PROXY_CLASSIFICATIONS = {
 }
 
 # Rate limiting settings
-REQUESTS_PER_SECOND = 10
+REQUESTS_PER_SECOND = 5
 REDUCED_REQUESTS_PER_SECOND = 2
 REQUEST_TIMEOUT = 20
 MAX_CONCURRENT_REQUESTS = 3
 
 # Retry settings
-MAX_RETRIES = 5
+MAX_RETRIES = 8
 RETRY_DELAY = 5
 BACKOFF_MULTIPLIER = 2
+MAX_RETRY_AFTER = 300
+
+# aiohttp rejects header values over 8190 bytes by default; GitHub's release
+# download responses occasionally exceed that (e.g. Content-Security-Policy)
+MAX_HEADER_FIELD_SIZE = 65536
 
 # User-Agent template for Wikipedia API compliance
 # The actual User-Agent will be built with the aiohttp version at runtime
