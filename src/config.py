@@ -74,6 +74,11 @@ RETRY_DELAY = 5
 BACKOFF_MULTIPLIER = 2
 MAX_RETRY_AFTER = 300
 
+# MediaWiki API error codes (returned with HTTP 200) worth retrying; any other
+# error code fails the request immediately
+RETRYABLE_API_ERROR_CODES = {"ratelimited", "maxlag", "readonly"}
+RETRYABLE_API_ERROR_PREFIX = "internal_api_error"
+
 # aiohttp rejects header values over 8190 bytes by default; GitHub's release
 # download responses occasionally exceed that (e.g. Content-Security-Policy)
 MAX_HEADER_FIELD_SIZE = 65536

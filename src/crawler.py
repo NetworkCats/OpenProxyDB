@@ -28,6 +28,8 @@ from src.config import (
     REQUEST_TIMEOUT,
     REQUESTS_PER_SECOND,
     RETRY_DELAY,
+    RETRYABLE_API_ERROR_CODES,
+    RETRYABLE_API_ERROR_PREFIX,
     WIKIPEDIA_API_URL,
     ZH_LOCAL_BLOCKS_PARAMS,
     ZH_WIKIPEDIA_API_URL,
@@ -124,18 +126,26 @@ class AsyncWikipediaCrawler:
         """Get the CSV handler."""
         return self._csv_handler
 
-    async def _make_request(self, endpoint_url: str, params: dict) -> dict:
+    async def _make_request(
+        self, endpoint_url: str, params: dict, list_key: str
+    ) -> dict:
         """Make an API request with retry logic.
+
+        MediaWiki reports API errors with HTTP 200 and an "error" object, so
+        the body is validated too: treating an error as an empty page would
+        end pagination early and silently truncate the crawl.
 
         Args:
             endpoint_url: The MediaWiki API endpoint URL.
             params: Query parameters for the API.
+            list_key: Key under "query" that must hold the result list.
 
         Returns:
             JSON response as dictionary.
 
         Raises:
-            WikipediaAPIError: If all retries are exhausted.
+            WikipediaAPIError: If the API returns a non-retryable error, the
+                response lacks the result list, or all retries are exhausted.
         """
         if not self._session:
             raise RuntimeError("Session not initialized. Use async context manager.")
@@ -166,7 +176,31 @@ class AsyncWikipediaCrawler:
                         continue
 
                     response.raise_for_status()
-                    return await response.json()
+                    data = await response.json()
+
+                api_error = data.get("error")
+                if api_error:
+                    code = api_error.get("code", "")
+                    info = api_error.get("info", "")
+                    if code not in RETRYABLE_API_ERROR_CODES and not code.startswith(
+                        RETRYABLE_API_ERROR_PREFIX
+                    ):
+                        raise WikipediaAPIError(
+                            f"API error from {endpoint_url}: {code}: {info}"
+                        )
+                    backoff_time = BACKOFF_MULTIPLIER ** (attempt + 1)
+                    logger.warning(
+                        f"API error {code} (attempt {attempt + 1}/{MAX_RETRIES}): "
+                        f"{info}. Backing off for {backoff_time}s"
+                    )
+                    await asyncio.sleep(backoff_time)
+                    continue
+
+                if not isinstance(data.get("query", {}).get(list_key), list):
+                    raise WikipediaAPIError(
+                        f"Response from {endpoint_url} has no query.{list_key} list"
+                    )
+                return data
 
             except asyncio.TimeoutError:
                 logger.warning(
@@ -210,9 +244,9 @@ class AsyncWikipediaCrawler:
         total_fetched = 0
 
         while True:
-            data = await self._make_request(WIKIPEDIA_API_URL, params)
+            data = await self._make_request(WIKIPEDIA_API_URL, params, "blocks")
 
-            blocks = data.get("query", {}).get("blocks", [])
+            blocks = data["query"]["blocks"]
             total_fetched += len(blocks)
 
             for block in blocks:
@@ -258,9 +292,9 @@ class AsyncWikipediaCrawler:
         total_fetched = 0
 
         while True:
-            data = await self._make_request(WIKIPEDIA_API_URL, params)
+            data = await self._make_request(WIKIPEDIA_API_URL, params, "globalblocks")
 
-            blocks = data.get("query", {}).get("globalblocks", [])
+            blocks = data["query"]["globalblocks"]
             total_fetched += len(blocks)
 
             for block in blocks:
@@ -306,9 +340,9 @@ class AsyncWikipediaCrawler:
         total_fetched = 0
 
         while True:
-            data = await self._make_request(ZH_WIKIPEDIA_API_URL, params)
+            data = await self._make_request(ZH_WIKIPEDIA_API_URL, params, "blocks")
 
-            blocks = data.get("query", {}).get("blocks", [])
+            blocks = data["query"]["blocks"]
             total_fetched += len(blocks)
 
             for block in blocks:
@@ -378,34 +412,32 @@ class AsyncWikipediaCrawler:
             logger.warning(f"Failed to read metadata CSV: {e}")
             return None
 
-    async def check_release_exists(self) -> bool:
+    async def check_release_exists(self) -> Optional[bool]:
         """Check if any release exists in the repository.
 
         Returns:
-            True if at least one release exists.
+            True if at least one release exists, False if none exist, or None
+            if the check itself failed (so callers never mistake an API
+            failure for an empty repository).
         """
         if not self._session:
             raise RuntimeError("Session not initialized. Use async context manager.")
 
-        github_token = os.environ.get("GITHUB_TOKEN")
-        if not github_token:
-            logger.warning("GITHUB_TOKEN not set, assuming no release exists")
-            return False
-
         url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases"
-        headers = {
-            "Authorization": f"token {github_token}",
-            "Accept": "application/vnd.github.v3+json",
-        }
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        # Releases of a public repo are readable without a token
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if github_token:
+            headers["Authorization"] = f"token {github_token}"
 
         try:
             async with self._session.get(url, headers=headers) as response:
                 response.raise_for_status()
                 releases = await response.json()
                 return len(releases) > 0
-        except aiohttp.ClientError as e:
-            logger.warning(f"Failed to check releases: {e}")
-            return False
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"Failed to check releases: {e}")
+            return None
 
     def _get_current_ips(self) -> Set[str]:
         """Get the current set of IPs in the block manager.
@@ -453,17 +485,12 @@ class AsyncWikipediaCrawler:
         if not self._session:
             raise RuntimeError("Session not initialized. Use async context manager.")
 
-        github_token = os.environ.get("GITHUB_TOKEN")
-        if not github_token:
-            logger.warning("GITHUB_TOKEN not set")
-            return None
-
         # Get latest release
         url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/releases/latest"
-        headers = {
-            "Authorization": f"token {github_token}",
-            "Accept": "application/vnd.github.v3+json",
-        }
+        headers = {"Accept": "application/vnd.github.v3+json"}
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if github_token:
+            headers["Authorization"] = f"token {github_token}"
 
         try:
             async with self._session.get(url, headers=headers) as response:
@@ -480,11 +507,11 @@ class AsyncWikipediaCrawler:
                             csv_response.raise_for_status()
                             return await csv_response.text()
 
-                logger.warning("CSV file not found in latest release")
+                logger.error("CSV file not found in latest release")
                 return None
 
-        except aiohttp.ClientError as e:
-            logger.warning(f"Failed to download latest CSV: {e}")
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"Failed to download latest CSV: {e}")
             return None
 
     async def run_full_crawl(self) -> bool:
@@ -560,33 +587,34 @@ class AsyncWikipediaCrawler:
     async def run_incremental_crawl(self) -> bool:
         """Run an incremental crawl since last crawl time.
 
+        History already exists, so any missing input is treated as a failure
+        rather than a reason to fall back to a full crawl: the run aborts and
+        the published data stays untouched until the next run.
+
         Returns:
             True if successful.
         """
         last_crawl_time = self.get_last_crawl_time()
         if not last_crawl_time:
-            logger.warning("No last crawl time found, running full crawl")
-            return await self.run_full_crawl()
+            logger.error(f"No {LAST_CRAWL_TIME_FILE} found; aborting incremental crawl")
+            return False
 
         logger.info(f"Starting incremental crawl since {last_crawl_time}...")
 
         # Download existing CSV from release
         existing_csv = await self.download_latest_csv()
         if not existing_csv:
-            # Cannot proceed without existing data, fall back to full crawl
-            logger.warning(
-                "Failed to download existing CSV, falling back to full crawl"
-            )
-            # Clean up old timestamp file to avoid repeated failures
-            if os.path.exists(LAST_CRAWL_TIME_FILE):
-                os.remove(LAST_CRAWL_TIME_FILE)
-                logger.info("Removed stale last_crawl_time file")
-            return await self.run_full_crawl()
+            logger.error("Failed to download existing CSV; aborting incremental crawl")
+            return False
 
-        # Load metadata CSV from local file (fetched by workflow from data branch)
+        # Load metadata CSV from local file (fetched by workflow from data branch).
+        # Without it every block would lose its expiry and never be removed.
         metadata_csv = self.load_metadata_csv()
         if not metadata_csv:
-            logger.warning("No metadata CSV found, timestamps will be empty")
+            logger.error(
+                f"No {METADATA_CSV_FILENAME} found; aborting incremental crawl"
+            )
+            return False
 
         # Load existing data into manager
         self._csv_handler.load_to_manager(
@@ -667,6 +695,9 @@ class AsyncWikipediaCrawler:
         # Check if release exists to determine mode
         release_exists = await self.check_release_exists()
 
+        if release_exists is None:
+            logger.error("Could not determine whether a release exists; aborting")
+            return False
         if release_exists:
             logger.info("Release exists, running incremental crawl")
             return await self.run_incremental_crawl()
